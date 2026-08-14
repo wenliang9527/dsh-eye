@@ -421,6 +421,28 @@ module.exports = {
       return refs
     }
 
+    // 图片占位符:内嵌视觉观察文本(双保险——即使 system 注入被下游丢弃,
+    // 模型也能从 user message 直接看到 OCR/VLM 结果)。
+    const withoutImagesWithText = (content, labels, visionText) => {
+      return content.flatMap((block) => {
+        if (!block) return [block]
+        if (block.type === 'image') {
+          const label = labels.get(String(block.attachment && block.attachment.attachmentId)) || 0
+          const body = visionText && visionText.trim() !== ''
+            ? visionText.trim()
+            : '无视觉内容'
+          return [{
+            type: 'text',
+            text: '[' + label + ' 用户上传了图片,以下为图片的视觉观察结果(OCR+VLM):]\n' + body,
+          }]
+        }
+        if (block.type === 'tool-result' && Array.isArray(block.content)) {
+          return [{ ...block, content: withoutImagesWithText(block.content, labels, visionText) }]
+        }
+        return [block]
+      })
+    }
+
     const withoutImages = (content, labels) => {
       return content.flatMap((block) => {
         if (!block) return [block]
@@ -479,7 +501,7 @@ module.exports = {
         const labels = new Map(refs.map((ref, index) => [String(ref.attachmentId), index + 1]))
         const transformed = messages.map((message) => ({
           ...message,
-          content: withoutImages(message && message.content, labels),
+          content: withoutImagesWithText(message && message.content, labels, analysis.text),
         }))
         const visionContext = buildVisionContext(analysis.text, task, refs.length)
         const system = options.system === undefined || String(options.system).trim() === ''
