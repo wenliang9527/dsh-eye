@@ -1,0 +1,10 @@
+{
+  "name": "dsh-eye-host",
+  "version": "0.1.0",
+  "description": "eye vision bridge — permanent host plugin: eye-vision virtual provider + llm/stream image intercept + eye_see tool",
+  "main": "index.js",
+  "license": "MIT",
+  "dependencies": {
+    "@deepseek-ai/dsh-tools": "^0.1.0"
+  }
+}
