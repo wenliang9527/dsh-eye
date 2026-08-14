@@ -179,6 +179,23 @@ return {
       return { cfg, cfgPath: fs.processPath(cfgTarget) }
     }
 
+    // ---- 设置 RPC:客户端设置页读写 .eye/eye.config.json ----
+    disposers.push(harness.handle('eye.loadConfig', async () => {
+      const { cfg } = await loadConfig()
+      return { vlm: cfg.vlm || { url: '', model: '', apiKey: '' }, ocr: cfg.ocr !== false }
+    }))
+    disposers.push(harness.handle('eye.saveConfig', async (args) => {
+      try {
+        const vlm = args && args.vlm ? { url: String(args.vlm.url || ''), model: String(args.vlm.model || ''), apiKey: String(args.vlm.apiKey || '') } : { url: '', model: '', apiKey: '' }
+        const ocr = args && typeof args.ocr === 'boolean' ? args.ocr : true
+        const target = await fs.resolve('.eye/eye.config.json', { cwd: root })
+        await fs.writeText(target, JSON.stringify({ vlm, ocr }, null, 2), undefined, undefined, policy)
+        return { ok: true }
+      } catch (err) {
+        return { ok: false, error: String(err && err.message ? err.message : err) }
+      }
+    }))
+
     // 图像(src = 附件 attachmentId 或本地路径)→ 纯文本(OCR + VLM)
     const describeImage = async (src, mediaType, cfg, cfgPath) => {
       const sub = ctx.get('subprocess')
