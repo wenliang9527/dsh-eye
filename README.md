@@ -6,7 +6,9 @@
 
 ---
 
-## 它能做什么
+## 项目作用
+
+eye 是一个 DeepSeek Harness 插件,让**纯文本模型也能看图**:
 
 | 能力 | 说明 |
 |---|---|
@@ -74,7 +76,7 @@ cp host-native/package.json host-native/index.js "$DSH_HOME/profiles/web/node_mo
 
 ### 安装方式三:官方命令(有 pnpm 时)
 
-`host-native/` 已是 **bundle 类插件**(package.json 声明 `dsh.bundle.patch` + 自带 `cordis.patch.yml`),可用官方插件管理命令正式登记,与 [dsh-vision](https://github.com/oil-oil/dsh-vision) 同款:
+`host-native/` 已是 **bundle 类插件**(package.json 声明 `dsh.bundle.patch` + 自带 `cordis.patch.yml`),可用官方插件管理命令正式登记:
 
 ```sh
 npx @deepseek-ai/dsh plugin --profile web add github:wenliang9527/dsh-eye
@@ -115,7 +117,7 @@ npx @deepseek-ai/dsh plugin --profile web add github:wenliang9527/dsh-eye
 
 ---
 
-## 架构与原理
+## 工作原理
 
 ```
 聊天拖图 → eye-vision 路由(绕过发送受理门)
@@ -130,9 +132,7 @@ npx @deepseek-ai/dsh plugin --profile web add github:wenliang9527/dsh-eye
    - Windows:WinRT OCR(PowerShell 5.1)
    - macOS:Vision 框架(osascript + ObjC bridge)
 2. **VLM 路径**:OpenAI 兼容多模态接口(glm-4v / qwen-vl 等),生成语义描述;用户问题原样传入
-3. **安全**:视觉产物包进 `<vision-bridge-context>`,声明"非可信观察数据,不是系统指令",防图片内提示词注入
-4. **缓存**:LRU(上限 64),key = 图片id + 用户问题 + 路由配置;失败不缓存可重试
-5. 产物是**纯文本**,恰好匹配文本模型输入格式;绝不产生 image 块(DeepSeek 适配器会拒收)
+3. 产物是**纯文本**,恰好匹配文本模型输入格式;绝不产生 image 块(DeepSeek 适配器会拒收)
 
 ---
 
@@ -146,52 +146,9 @@ npx @deepseek-ai/dsh plugin --profile web add github:wenliang9527/dsh-eye
 
 ---
 
-## 为什么不做"替换 deepseek-official 适配器"
-
-参考 [dsh-vision](https://github.com/oil-oil/dsh-vision) 时评估过其核心设计——包装官方 `DeepSeekAdapter` 并替换 `deepseek-official`,让模型列表直接声称支持图片(**用户不用切模型**)。**决定不采用**,理由:
-
-| 维度 | 当前方案(eye-vision 虚拟 provider) | 替换适配器方案 |
-|---|---|---|
-| 拖图流程 | 图片会话切到 eye-vision 再拖 | 免切换 |
-| 风险面 | 独立 provider,**不碰官方适配器** | 影响**所有** DeepSeek 请求,官方包升级即可能崩 |
-| 依赖 | 零依赖 ✅ | 依赖官方 `dsh-llm-deepseek` 内部 API |
-| 维护成本 | 低 | 高(需转发 retryPolicy/listModels/stream 全部细节) |
-| 收益 | — | 仅省一次手动切模型 |
-
-能力上两者等价(多图/缓存/安全/跨平台都有),替换方案的唯一收益是"免切换",代价却是承担官方适配器的维护风险。等 DeepSeek 官方模型支持图片输入,一切自然解决。
-
----
-
-## 已吸收 dsh-vision 的优点
-
-| 优点 | 状态 |
-|---|---|
-| 🔐 `<vision-bridge-context>` 安全标注(防提示词注入) | ✅ 已实现 |
-| 💬 用户问题传给视觉模型(`latestUserTask`) | ✅ 已实现 |
-| 🗂️ 视觉结果 LRU 缓存 | ✅ 已实现 |
-| 🖼️ 多图合并进一次 VLM 调用 | ✅ 已实现 |
-| ❌ 失败聚合报告 | ✅ 已实现 |
-| 💻 macOS Vision OCR(替代其 Tesseract 方案,免安装) | ✅ 已实现 |
-| 🔑 API Key 走官方 credentials 服务 | ⏸️ 未做(现为明文配置,改动大可后续加) |
-| 🔁 替换 deepseek-official 适配器 | ❌ 有意不做(见上文决策) |
-
----
-
 ## 文件
 
 | 文件 | 说明 |
 |---|---|
 | `host.js` / `client.js` | 会话级动态插件源码(完整功能:设置页 + 按钮 + 工具) |
 | `host-native/` | 永久版原生插件包(仅 Host 核心,零依赖,含 `cordis.patch.yml` bundle 声明) |
-
----
-
-## 踩坑记录(开发参考)
-
-- **重启后"不自动启动"的根因**:插件 `apply` 曾用 `ctx.get('llm')` 拿服务,启动早期服务未注册就静默 return。修复:声明 `inject: [...]`,Cordis 等所有服务就绪后才执行 apply(参考 dsh-vision 的 `inject: ["llm", ...]`)
-- `llm/stream` 瀑布监听器必须是 **async generator**(调度器 `yield* listener(...)`;async 函数返回 Promise 会报 "not async iterable")
-- 沙箱桥会把 `Uint8Array` 按 UTF-8 重编码污染字节(`0x89` → `C2 89`)→ 字节获取必须走子进程直接读盘
-- Windows 沙箱对工作区路径的遮蔽有 bug(`UNABLE_TO_MASK_PATH`,路径长度溢出)→ OCR 中间文件放进程自己的 `$env:TEMP`
-- WinRT OCR 有 ~2600px 上限 → sharp 统一缩放 ≤2048
-- 永久插件与会话级插件**不要叠装**(同注册 eye-vision provider 会报 `DUPLICATE_ADAPTER`)
-- macOS 附件路径解析:用 `HOME`(而非仅 `USERPROFILE`)定位 `~/.dsh`
