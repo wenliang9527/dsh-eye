@@ -95,13 +95,25 @@ npx @deepseek-ai/dsh plugin --profile web add github:wenliang9527/dsh-eye
 
 ---
 
-## 配置(`.eye/eye.config.json`,工作区根目录,首次调用自动生成)
+## 配置
+
+### 方式一:设置卡片(推荐,网页操作)
+
+1. 打开 **设置 → 插件 → 👁 eye 视觉桥**
+2. 填写:
+   - **VLM API 地址**:`https://open.bigmodel.cn/api/paas/v4/chat/completions`(智谱)
+   - **视觉模型**:`glm-4v-flash`(智谱免费档)/ `qwen-vl-plus`(阿里百炼)等
+   - **API Key**:你的 Key
+3. 点「保存」→ 各项显示「已配置」
+4. API Key 走**官方凭据服务**单向写入,界面不读回明文,不落仓库
+
+### 方式二:配置文件(`.eye/eye.config.json`,工作区根目录,首次调用自动生成)
 
 ```json
 {
   "vlm": {
-    "url": "https://<提供商>/v1/chat/completions",
-    "model": "<视觉模型名,如 glm-4v / qwen-vl-plus>",
+    "url": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+    "model": "glm-4v-flash",
     "apiKey": "<你的 API Key>",
     "prompt": "可选,自定义描述提示词"
   },
@@ -114,6 +126,8 @@ npx @deepseek-ai/dsh plugin --profile web add github:wenliang9527/dsh-eye
   - macOS:系统 Vision 框架,零安装
 - 配置后图片识别 = OCR 文字 + VLM 语义描述双路径,艺术字/图表识别更准确
 - `eye_see` 工具:`mode` = `auto`(OCR+VLM)/ `ocr` / `vlm`
+
+> 💡 **智谱 GLM-4V 免费档**:到 [bigmodel.cn](https://bigmodel.cn) 注册,控制台创建 API Key,`glm-4v-flash` 免费调用,零成本获得语义级图片理解。
 
 ---
 
