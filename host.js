@@ -1,7 +1,8 @@
 // ============================================================
 //  eye — HOST half
-//  👁 给纯文本模型配"外挂的眼睛":eye_see 工具
-//  图片 → (OCR + 在线 VLM) → 纯文本 → 注入模型上下文
+//  👁 给纯文本模型配"外挂的眼睛"
+//  1) eye_see 工具:本地图片路径 → OCR + VLM → 纯文本
+//  2) llm/stream 拦截:聊天上传的图片块 → 自动转文本(突破图片发不出去的限制)
 //  使用:把本文件内容粘贴到 cordis_define 的 code.host(idPrefix: "eye")
 // ============================================================
 return {
@@ -10,10 +11,14 @@ return {
     const sandboxPolicy = ctx.get('sandboxPolicy')
     if (fs === undefined || sandboxPolicy === undefined) return
 
-    // ---- Windows WinRT OCR 脚本(PowerShell 5.1),首次使用时写入工作区 .eye/ ----
-    const OCR_PS1 = [
-      'param([string]$Path)',
+    // ---- Windows WinRT OCR 脚本(stdin 收 base64,PowerShell 5.1)----
+    const OCR_STDIN_PS1 = [
+      'param()',
       '[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)',
+      '$b64 = [Console]::In.ReadToEnd().Trim()',
+      'if ($b64.Length -eq 0) { Write-Output "__OCR_ERROR__: empty stdin"; exit 1 }',
+      '$tmp = Join-Path $env:TEMP ("eye-ocr-" + [guid]::NewGuid().ToString("N") + ".png")',
+      '[IO.File]::WriteAllBytes($tmp, [Convert]::FromBase64String($b64))',
       'Add-Type -AssemblyName System.Runtime.WindowsRuntime',
       "$asTaskGeneric = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object { $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1' })[0]",
       'function Await($WinRtTask, $ResultType) {',
@@ -26,12 +31,13 @@ return {
       '[Windows.Media.Ocr.OcrEngine,Windows.Foundation,ContentType=WindowsRuntime] > $null',
       '[Windows.Graphics.Imaging.BitmapDecoder,Windows.Graphics.Imaging,ContentType=WindowsRuntime] > $null',
       'try {',
-      '  $file = Await ([Windows.Storage.StorageFile]::GetFileFromPathAsync($Path)) ([Windows.Storage.StorageFile])',
+      '  $file = Await ([Windows.Storage.StorageFile]::GetFileFromPathAsync($tmp)) ([Windows.Storage.StorageFile])',
       '  $stream = Await ($file.OpenAsync([Windows.Storage.FileAccessMode]::Read)) ([Windows.Storage.Streams.IRandomAccessStream])',
       '  $decoder = Await ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])',
       '  $bitmap = Await ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])',
       '} catch {',
       '  Write-Output "__OCR_ERROR__: $($_.Exception.Message)"',
+      '  Remove-Item $tmp -Force -ErrorAction SilentlyContinue',
       '  exit 1',
       '}',
       '$engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()',
@@ -39,24 +45,25 @@ return {
       '  $langs = [Windows.Media.Ocr.OcrEngine]::AvailableRecognizerLanguages',
       '  if ($langs.Count -gt 0) { $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage($langs[0]) }',
       '}',
-      'if ($null -eq $engine) { Write-Output "__OCR_UNAVAILABLE__"; exit 0 }',
+      'if ($null -eq $engine) { Remove-Item $tmp -Force -ErrorAction SilentlyContinue; Write-Output "__OCR_UNAVAILABLE__"; exit 0 }',
       '$result = Await ($engine.RecognizeAsync($bitmap)) ([Windows.Media.Ocr.OcrResult])',
       'foreach ($line in $result.Lines) { Write-Output $line.Text }',
+      'Remove-Item $tmp -Force -ErrorAction SilentlyContinue',
     ].join('\r\n') + '\r\n'
 
-    // ---- VLM 描述脚本(独立 node,OpenAI 兼容 chat/completions),首次使用时写入 .eye/ ----
-    const VLM_MJS = [
+    // ---- VLM 描述脚本(stdin 收 base64,独立 node,OpenAI 兼容)----
+    const VLM_STDIN_MJS = [
       "import { readFileSync } from 'node:fs'",
-      'const [imagePath, configPath] = process.argv.slice(2)',
+      'const [configPath, mediaType] = process.argv.slice(2)',
+      "const b64 = readFileSync(0, 'utf8').trim()",
+      "if (!b64) { console.error('empty stdin'); process.exit(2) }",
       "const cfg = JSON.parse(readFileSync(configPath, 'utf8'))",
       'const vlm = cfg && cfg.vlm',
       'if (!vlm || !vlm.url || !vlm.model || !vlm.apiKey) {',
       "  console.error('eye.config.json 缺少 vlm.url / vlm.model / vlm.apiKey')",
       '  process.exit(3)',
       '}',
-      'const lower = String(imagePath).toLowerCase()',
-      "const mime = lower.endsWith('.png') ? 'image/png' : lower.endsWith('.webp') ? 'image/webp' : lower.endsWith('.gif') ? 'image/gif' : 'image/jpeg'",
-      "const b64 = readFileSync(imagePath).toString('base64')",
+      "const mime = /^image\\/(png|jpeg|webp|gif)$/.test(mediaType || '') ? mediaType : 'image/png'",
       "const prompt = vlm.prompt || '请详细描述这张图片:包括画面内容、图表数据、界面元素、文字等。'",
       'const res = await fetch(vlm.url, {',
       "  method: 'POST',",
@@ -84,18 +91,20 @@ return {
 
     const policy = sandboxPolicy.resolve()
     const root = policy.workspaceRoot || sandboxPolicy.workspaceRoot
+    const disposers = []
 
+    // ---------- 工具函数 ----------
     const resolveExe = async (sub, name, fallback) => {
       try { return await sub.resolveExecutable(name) } catch (e) { return fallback }
     }
 
-    // 跑一个子进程并收集输出(collect 流,超时 100s 兜底 terminate)
-    const runSub = async (sub, argv, maxOut) => {
+    // 跑子进程并收集输出(stdin 可选,100s 超时兜底 terminate)
+    const runSub = async (sub, argv, maxOut, stdinData) => {
       const handle = sub.spawn({
         argv,
         cwd: root,
         stdio: {
-          stdin: 'ignore',
+          stdin: stdinData !== undefined ? { data: stdinData } : 'ignore',
           stdout: { maxBytes: maxOut, spill: { maxBytes: 8 * 1024 * 1024 } },
           stderr: { maxBytes: maxOut, spill: { maxBytes: 8 * 1024 * 1024 } },
         },
@@ -110,7 +119,118 @@ return {
       return { exitCode: outcome.exitCode, stdout: read(handle.collected.stdout), stderr: read(handle.collected.stderr) }
     }
 
-    // 核心:看一张图,返回纯文本
+    const bytesToBase64 = (bytes) => {
+      let binary = ''
+      const chunk = 0x8000
+      for (let i = 0; i < bytes.length; i += chunk) {
+        binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk))
+      }
+      return btoa(binary)
+    }
+
+    const mediaTypeForPath = (p) => {
+      const lower = String(p).toLowerCase()
+      if (lower.endsWith('.png')) return 'image/png'
+      if (lower.endsWith('.webp')) return 'image/webp'
+      if (lower.endsWith('.gif')) return 'image/gif'
+      return 'image/jpeg'
+    }
+
+    const ensure = async (name, content) => {
+      const t = await fs.resolve('.eye/' + name, { cwd: root })
+      const info = await fs.stat(t)
+      if (!info) await fs.writeText(t, content, undefined, undefined, policy)
+      return fs.processPath(t)
+    }
+
+    const loadConfig = async () => {
+      const cfgTarget = await fs.resolve('.eye/eye.config.json', { cwd: root })
+      let cfg = {}
+      const cfgInfo = await fs.stat(cfgTarget)
+      if (cfgInfo) {
+        try { cfg = JSON.parse(await fs.readText(cfgTarget)) } catch (e) { cfg = {} }
+      } else {
+        await fs.writeText(cfgTarget, '{\n  "vlm": { "url": "", "model": "", "apiKey": "" },\n  "ocr": true\n}\n', undefined, undefined, policy)
+      }
+      return { cfg, cfgPath: fs.processPath(cfgTarget) }
+    }
+
+    // 一张图(base64)→ 文本(OCR + VLM 双路径)
+    const describeBytes = async (b64, mediaType, cfg, cfgPath) => {
+      const sub = ctx.get('subprocess')
+      if (sub === undefined) return '[eye: subprocess 服务不可用]'
+      const ocrScriptPath = await ensure('eye-ocr-stdin.ps1', OCR_STDIN_PS1)
+      const vlmScriptPath = await ensure('eye-vlm-stdin.mjs', VLM_STDIN_MJS)
+      const parts = []
+      if (cfg.ocr !== false) {
+        const ps = await resolveExe(sub, 'powershell', 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe')
+        const r = await runSub(sub, [ps, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ocrScriptPath], 1000000, b64)
+        const out = r.stdout.trim()
+        if (out === '__OCR_UNAVAILABLE__') parts.push('[OCR 不可用: 系统未安装 OCR 语言包]')
+        else if (r.exitCode !== 0 && out.startsWith('__OCR_ERROR__')) parts.push(out)
+        else parts.push(out)
+      }
+      if (cfg.vlm && cfg.vlm.url && cfg.vlm.model && cfg.vlm.apiKey) {
+        const node = await resolveExe(sub, 'node', 'node')
+        const r = await runSub(sub, [node, vlmScriptPath, cfgPath, mediaType || 'image/png'], 4000000, b64)
+        if (r.exitCode === 0) parts.push(r.stdout.trim())
+        else parts.push('[VLM 失败: ' + (r.stderr.trim() || 'exit ' + r.exitCode) + ']')
+      }
+      return parts.length > 0 ? parts.join('\n') : '[eye: 无可用的视觉路径]'
+    }
+
+    // ---------- llm/stream 拦截:图片块 → eye 文本(聊天上传即可用) ----------
+    // 注意:waterfall 调度器对监听器做 yield*(listener(...)),监听器必须返回异步可迭代对象,
+    // 因此必须是 async generator(普通 async 函数返回 Promise 会报 "not async iterable")
+    const onLlmStream = async function* (options, next) {
+      try {
+        const messages = options && Array.isArray(options.messages) ? options.messages : []
+        const hasImage = messages.some((m) => Array.isArray(m.content) && m.content.some((b) => b && b.type === 'image'))
+        if (!hasImage) { yield* next(); return }
+        const llm = ctx.get('llm')
+        const attachments = ctx.get('attachments')
+        if (llm === undefined || attachments === undefined) { yield* next(); return }
+        // 路由门控:目标模型本身支持图片则放行给原生多模态
+        try {
+          const info = await llm.resolveModelInfo(options.provider, options.model)
+          if (info && Array.isArray(info.inputModalities) && info.inputModalities.includes('image')) { yield* next(); return }
+        } catch (e) {}
+        const { cfg, cfgPath } = await loadConfig()
+        const transformed = []
+        for (const message of messages) {
+          const content = message.content
+          if (!Array.isArray(content) || !content.some((b) => b && b.type === 'image')) {
+            transformed.push(message)
+            continue
+          }
+          const blocks = []
+          for (const block of content) {
+            if (block.type !== 'image') { blocks.push(block); continue }
+            const ref = block.attachment
+            if (!ref || !ref.attachmentId) { blocks.push(block); continue }
+            try {
+              const stored = await attachments.readImage(ref, undefined)
+              const data = stored && stored.data ? stored.data : null
+              if (!data) { blocks.push(block); continue }
+              const b64 = bytesToBase64(data)
+              const text = await describeBytes(b64, ref.mediaType || 'image/png', cfg, cfgPath)
+              blocks.push({ type: 'text', text: '[用户上传的图片已由 eye 转换为文本(图片本身已展示在会话中)]\n' + text })
+            } catch (err) {
+              const message = err && err.message ? err.message : String(err)
+              blocks.push({ type: 'text', text: '[eye 转换图片失败: ' + message + ']' })
+            }
+          }
+          transformed.push({ ...message, content: blocks })
+        }
+        // 重入 llm.stream(手建请求不受深度冻结限制);转换后无图片块,各 listener 直接放行
+        yield* llm.stream({ ...options, messages: transformed })
+      } catch (err) {
+        yield* next()
+      }
+    }
+    disposers.push(ctx.on('llm/stream', onLlmStream))
+
+    // ---------- eye_see 工具(直接看本地文件:readBytes + stdin 脚本) ----------
     const see = async (filePath, mode) => {
       const sub = ctx.get('subprocess')
       if (sub === undefined) return { ok: false, text: 'eye: subprocess 服务不可用' }
@@ -119,62 +239,38 @@ return {
         return { ok: false, text: 'eye: 只支持 png/jpg/jpeg/webp/gif(得到 ' + filePath + ')' }
       }
       try {
-        // 解析图片路径
         const imgTarget = await fs.resolve(filePath, { cwd: root })
         const imgInfo = await fs.stat(imgTarget)
         if (!imgInfo) return { ok: false, text: 'eye: 文件不存在: ' + filePath }
-        const imgPath = fs.processPath(imgTarget)
-
-        // 确保辅助脚本存在(首次调用写入)
-        const ensure = async (name, content) => {
-          const t = await fs.resolve('.eye/' + name, { cwd: root })
-          const info = await fs.stat(t)
-          if (!info) await fs.writeText(t, content, undefined, undefined, policy)
-          return fs.processPath(t)
-        }
-        const ocrScriptPath = await ensure('eye-ocr.ps1', OCR_PS1)
-        const vlmScriptPath = await ensure('eye-vlm.mjs', VLM_MJS)
-
-        // 配置(.eye/eye.config.json,缺失时写模板)
-        const cfgTarget = await fs.resolve('.eye/eye.config.json', { cwd: root })
-        let cfg = {}
-        const cfgInfo = await fs.stat(cfgTarget)
-        if (cfgInfo) {
-          try { cfg = JSON.parse(await fs.readText(cfgTarget)) } catch (e) { cfg = {} }
-        } else {
-          await fs.writeText(cfgTarget, '{\n  "vlm": { "url": "", "model": "", "apiKey": "" },\n  "ocr": true\n}\n', undefined, undefined, policy)
-        }
-        const cfgPath = fs.processPath(cfgTarget)
-
+        const data = await fs.readBytes(imgTarget, undefined, 10 * 1024 * 1024)
+        const b64 = bytesToBase64(data)
+        const { cfg, cfgPath } = await loadConfig()
         const ocrEnabled = cfg.ocr !== false
         const vlmConfigured = !!(cfg.vlm && cfg.vlm.url && cfg.vlm.model && cfg.vlm.apiKey)
         const doOcr = ocrEnabled && (mode === 'auto' || mode === 'ocr')
         const doVlm = (mode === 'auto' || mode === 'vlm') && (vlmConfigured || mode === 'vlm')
-
-        // OCR:Windows 自带 WinRT OCR(PowerShell 5.1)
+        const ocrScriptPath = await ensure('eye-ocr-stdin.ps1', OCR_STDIN_PS1)
+        const vlmScriptPath = await ensure('eye-vlm-stdin.mjs', VLM_STDIN_MJS)
         let ocrText = ''
         if (doOcr) {
           const ps = await resolveExe(sub, 'powershell', 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe')
-          const r = await runSub(sub, [ps, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ocrScriptPath, imgPath], 1000000)
+          const r = await runSub(sub, [ps, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ocrScriptPath], 1000000, b64)
           const out = r.stdout.trim()
           if (out === '__OCR_UNAVAILABLE__') ocrText = '[OCR 不可用:系统未安装 OCR 语言包]'
           else if (r.exitCode !== 0 && out.startsWith('__OCR_ERROR__')) ocrText = out
           else ocrText = out
         }
-
-        // VLM:OpenAI 兼容接口(node 自带 TLS,沙箱下可用)
         let vlmText = ''
         if (doVlm) {
           if (!vlmConfigured) {
             vlmText = '[VLM 未配置: 在 ' + cfgPath + ' 填写 vlm.url / vlm.model / vlm.apiKey]'
           } else {
             const node = await resolveExe(sub, 'node', 'node')
-            const r = await runSub(sub, [node, vlmScriptPath, imgPath, cfgPath], 4000000)
+            const r = await runSub(sub, [node, vlmScriptPath, cfgPath, mediaTypeForPath(filePath)], 4000000, b64)
             if (r.exitCode === 0) vlmText = r.stdout.trim()
             else vlmText = '[VLM 失败: ' + (r.stderr.trim() || 'exit ' + r.exitCode) + ']'
           }
         }
-
         const parts = []
         parts.push('[eye] 图片: ' + filePath)
         if (ocrText) parts.push('<OCR>\n' + ocrText)
@@ -186,10 +282,9 @@ return {
       }
     }
 
-    const disposers = []
     const tool = harness.defineTool({
       name: 'eye_see',
-      description: '读取图片并把内容转成纯文本(OCR + VLM 双路径)供纯文本模型理解:OCR 提取文字, VLM 生成语义描述。配置: .eye/eye.config.json',
+      description: '读取图片并把内容转成纯文本(OCR + VLM 双路径)供纯文本模型理解:配置 .eye/eye.config.json',
       parameters: {
         file_path: { type: 'string', required: true, description: '图片路径(png/jpg/jpeg/webp/gif)' },
         mode: { type: 'string', enum: ['auto', 'ocr', 'vlm'] },
