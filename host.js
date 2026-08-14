@@ -180,11 +180,10 @@ return {
       return parts.length > 0 ? parts.join('\n') : '[eye: 无可用的视觉路径]'
     }
 
-    // ---------- 虚拟模型提供商 eye-vision:声称支持图片,转发给 deepseek ----------
-    // 模型选择器里选 eye-vision 后,发送受理门的 resolveModelInfo 检查通过,
-    // 图片消息进入 llm/stream,由下方拦截转文本,再转发给真实的 deepseek 适配器
+    // ---------- 虚拟模型提供商 eye-vision:声称支持图片,转发给 deepseek-official ----------
+    // 注意:本部署中真实 deepseek 适配器的提供商 id 是 deepseek-official(不是 deepseek)
     const VISION_PROVIDER = 'eye-vision'
-    const TARGET_PROVIDER = 'deepseek'
+    const TARGET_PROVIDER = 'deepseek-official'
 
     const visionAdapter = {
       providerInfo(provider) {
@@ -194,7 +193,15 @@ return {
       async listModels(provider) {
         try {
           const models = await llm.listModels(TARGET_PROVIDER)
-          return Array.isArray(models) ? models : []
+          // 运行时校验要求 model.provider === provider,必须重映射为 eye-vision
+          return Array.isArray(models)
+            ? models.map((m) => ({
+                provider,
+                id: m.id,
+                name: m.name,
+                ...(m.description !== undefined ? { description: m.description } : {}),
+              }))
+            : []
         } catch (e) { return [] }
       },
       async resolveModel(provider, model, signal) {
