@@ -1,10 +1,19 @@
 {
   "name": "dsh-eye-host",
-  "version": "0.1.0",
-  "description": "eye vision bridge — permanent host plugin: eye-vision virtual provider + llm/stream image intercept + eye_see tool",
+  "version": "0.2.0",
+  "description": "eye vision bridge — permanent host plugin: eye-vision virtual provider + llm/stream image intercept + eye_see tool (zero-dependency, inject-declared services)",
   "main": "index.js",
   "license": "MIT",
-  "dependencies": {
-    "@deepseek-ai/dsh-tools": "^0.1.0"
+  "keywords": [
+    "deepseek-harness",
+    "dsh-plugin",
+    "vision",
+    "ocr",
+    "windows"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
   }
 }

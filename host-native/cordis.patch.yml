@@ -1,0 +1,8 @@
+# dsh-eye-host bundle patch — 参照 dsh-vision 的 bundle 类安装方式:
+# 包声明 dsh.bundle.patch 后,通过 `dsh plugin --profile web add github:wenliang9527/dsh-eye`
+# 安装,reconcile 会自动把包加入 dsh.profile.bundles,启动时本文件作为 bundle 层生效。
+# 注意:eye 注册的是新虚拟 provider eye-vision,不替换 deepseek-official,
+# 因此不需要像 dsh-vision 那样 disable llm-deepseek。
+- insert:
+    - id: eye-host
+      name: dsh-eye-host

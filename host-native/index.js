@@ -1,13 +1,11 @@
 'use strict'
 // ============================================================
-//  dsh-eye-host — eye 视觉桥(永久版,原生 cordis 插件)
+//  dsh-eye-host — eye 视觉桥(永久版,原生 cordis 插件,无外部依赖)
 //  1) eye-vision 虚拟提供商:声称支持图片,流式转发给 deepseek-official
 //  2) llm/stream 拦截:聊天上传图片块 → OCR+VLM → 文本
 //  3) eye_see 工具:本地图片路径 → 文本
-//  配置:.eye/eye.config.json(工作区根目录,gitignore)
-//  说明:原生插件无 harness,设置页 RPC 不包含;UI(设置页/按钮)仍由会话级动态插件提供
+//  配置:.eye/eye.config.json(会话工作区根目录,gitignore)
 // ============================================================
-const { defineTool } = require('@deepseek-ai/dsh-tools')
 
 const REF_TO_PNG_B64_MJS = [
   "import sharp from 'sharp'",
@@ -112,11 +110,14 @@ const VLM_FILE_MJS = [
 
 module.exports = {
   name: 'dsh-eye-host',
+  // Cordis inject:声明硬依赖,所有服务就绪后才执行 apply。
+  // 不能用 ctx.get() 拿服务(启动早期服务未注册会静默失败)——这是
+  // 重启后"不自动启动"的根因,参考 dsh-vision 的 inject: ["llm", ...]。
+  inject: ['fs', 'sandboxPolicy', 'llm', 'subprocess', 'timer', 'tools'],
   apply(ctx) {
-    const fs = ctx.get('fs')
-    const sandboxPolicy = ctx.get('sandboxPolicy')
-    const llm = ctx.get('llm')
-    if (!fs || !sandboxPolicy || !llm) return
+    const fs = ctx.fs
+    const sandboxPolicy = ctx.sandboxPolicy
+    const llm = ctx.llm
 
     const policy = sandboxPolicy.resolve()
     const root = policy.workspaceRoot || sandboxPolicy.workspaceRoot
@@ -138,7 +139,7 @@ module.exports = {
         graceMs: 3000,
       })
       let killTimer
-      const timers = ctx.get('timer')
+      const timers = ctx.timer
       if (timers) killTimer = timers.timeout(() => { try { handle.terminate() } catch (e) {} }, 100000)
       const outcome = await handle.done
       if (killTimer) killTimer()
@@ -162,7 +163,7 @@ module.exports = {
     }
 
     const describeImage = async (src, mediaType, cfg, cfgPath) => {
-      const sub = ctx.get('subprocess')
+      const sub = ctx.subprocess
       if (!sub) return '[eye: subprocess 服务不可用]'
       const toPngPath = await ensure('eye-to-png-b64.mjs', REF_TO_PNG_B64_MJS)
       const ocrPs1 = await ensure('eye-ocr-stdin.ps1', OCR_STDIN_PS1)
@@ -246,7 +247,7 @@ module.exports = {
     }
     disposers.push(ctx.on('llm/stream', onLlmStream))
 
-    // ---- eye_see 工具 ----
+    // ---- eye_see 工具(JSON-schema 形式,无外部依赖)----
     const mediaTypeForPath = (p) => {
       const lower = String(p).toLowerCase()
       if (lower.endsWith('.png')) return 'image/png'
@@ -274,14 +275,34 @@ module.exports = {
       } catch (err) { return { ok: false, text: 'eye 失败: ' + String(err && err.message || err) } }
     }
 
-    const tool = defineTool({
+    const tool = {
       name: 'eye_see',
       description: '读取图片并把内容转成纯文本(OCR + VLM 双路径)供纯文本模型理解:配置 .eye/eye.config.json',
-      parameters: { file_path: { type: 'string', required: true, description: '图片路径(png/jpg/jpeg/webp/gif)' }, mode: { type: 'string', enum: ['auto', 'ocr', 'vlm'] } },
-      output: { schema: { type: 'object', additionalProperties: false, properties: { ok: { type: 'boolean', required: true }, text: { type: 'string', required: true } } }, render(args, value) { return [{ type: 'text', text: value && value.text ? value.text : String(value) }] } },
+      parameters: {
+        type: 'object',
+        properties: {
+          file_path: { type: 'string', description: '图片路径(png/jpg/jpeg/webp/gif)' },
+          mode: { type: 'string', enum: ['auto', 'ocr', 'vlm'] },
+        },
+        required: ['file_path'],
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            ok: { type: 'boolean' },
+            text: { type: 'string' },
+          },
+          required: ['ok', 'text'],
+        },
+        render(args, value) {
+          return [{ type: 'text', text: value && value.text ? value.text : String(value) }]
+        },
+      },
       execute: async (args) => see(args.file_path, args.mode || 'auto'),
-    })
-    const tools = ctx.get('tools')
+    }
+    const tools = ctx.tools
     if (tools) disposers.push(tools.register(tool))
 
     return () => {
