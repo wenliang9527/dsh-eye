@@ -98,7 +98,7 @@ const VLM_FILE_MJS = [
   'const resolveSrc = (s) => {',
   "  if (typeof s === 'string' && s.startsWith('sha256:')) {",
   "    const hex = s.slice(7)",
-  "    const home = process.env.DSH_HOME || path.join(process.env.USERPROFILE || 'C:\\\\Users\\\\default', '.dsh')",
+  "    const home = process.env.DSH_HOME || path.join(process.env.USERPROFILE || process.env.HOME || '', '.dsh')",
   "    return path.join(home, 'attachments', 'v1', 'objects', hex.slice(0, 2), hex)",
   '  }',
   '  return s',
@@ -121,6 +121,55 @@ const VLM_FILE_MJS = [
   'const text = typeof c === "string" ? c : (Array.isArray(c) ? c.filter((p) => p && p.type === "text").map((p) => p.text || "").join("\\n") : "")',
   "if (typeof text !== 'string' || text.trim() === '') { console.error('VLM 响应缺少 choices[0].message.content'); process.exit(2) }",
   'console.log(text)',
+].join('\n') + '\n'
+
+// macOS Vision OCR(JXA + ObjC bridge,参考 dsh-vision 的 local-vision.ts):
+// osascript -l JavaScript 执行,argv[0] = 图片绝对路径,stdout = JSON
+// { backend, width, height, items: string[] }
+const MACOS_VISION_JXA = [
+  'ObjC.import("CoreGraphics");',
+  'ObjC.import("Foundation");',
+  'ObjC.import("ImageIO");',
+  'ObjC.import("Vision");',
+  'function unwrap(value) { return ObjC.unwrap(value); }',
+  'function run(argv) {',
+  '  const path = argv[0];',
+  '  const url = $.NSURL.fileURLWithPath(path);',
+  '  const source = $.CGImageSourceCreateWithURL(url, null);',
+  '  if (!source) throw new Error("Cannot decode image: " + path);',
+  '  const image = $.CGImageSourceCreateImageAtIndex(source, 0, null);',
+  '  const request = $.VNRecognizeTextRequest.alloc.init;',
+  '  request.recognitionLevel = 0;',
+  '  request.usesLanguageCorrection = true;',
+  '  if (request.respondsToSelector("supportedRecognitionLanguagesAndReturnError:")) {',
+  '    const languageError = Ref();',
+  '    const supported = request.supportedRecognitionLanguagesAndReturnError(languageError);',
+  '    const preferred = ["zh-Hans", "zh-Hant", "en-US"];',
+  '    const selected = [];',
+  '    for (let index = 0; index < preferred.length; index += 1) {',
+  '      if (supported.containsObject($(preferred[index]))) selected.push(preferred[index]);',
+  '    }',
+  '    if (selected.length > 0) request.recognitionLanguages = $(selected);',
+  '  }',
+  '  const handler = $.VNImageRequestHandler.alloc.initWithURLOptions(url, $.NSDictionary.dictionary);',
+  '  const error = Ref();',
+  '  if (!handler.performRequestsError($.NSArray.arrayWithObject(request), error)) {',
+  '    const detail = error[0] ? unwrap(error[0].localizedDescription) : "unknown error";',
+  '    throw new Error("Vision OCR failed: " + detail);',
+  '  }',
+  '  const items = [];',
+  '  const results = request.results;',
+  '  for (let index = 0; index < Number(results.count); index += 1) {',
+  '    const candidates = results.objectAtIndex(index).topCandidates(1);',
+  '    if (Number(candidates.count) > 0) items.push(unwrap(candidates.objectAtIndex(0).string));',
+  '  }',
+  '  return JSON.stringify({',
+  '    backend: "macos-vision",',
+  '    width: Number($.CGImageGetWidth(image)),',
+  '    height: Number($.CGImageGetHeight(image)),',
+  '    items: items',
+  '  });',
+  '}',
 ].join('\n') + '\n'
 
 module.exports = {
@@ -177,6 +226,17 @@ module.exports = {
       return { cfg, cfgPath: fs.processPath(cfgTarget) }
     }
 
+    // 把 sha256: 附件引用解析为绝对路径(供 macOS Vision 直接读文件;WinRT 走 stdin 不需要)
+    const resolveSrcPath = (src) => {
+      if (typeof src === 'string' && src.startsWith('sha256:')) {
+        const hex = src.slice(7)
+        const home = process.env.DSH_HOME || (process.env.USERPROFILE || process.env.HOME || '')
+        const sep = process.platform === 'win32' ? '\\' : '/'
+        return home + sep + '.dsh' + sep + 'attachments' + sep + 'v1' + sep + 'objects' + sep + hex.slice(0, 2) + sep + hex
+      }
+      return src
+    }
+
     // ---- 视觉分析核心:多图,OCR 逐图 + VLM 一次合并,失败聚合 ----
     // refs: [{ attachmentId, mediaType }]
     const describeImages = async (refs, task, cfg, cfgPath) => {
@@ -187,22 +247,37 @@ module.exports = {
       const vlmMjs = await ensure('eye-vlm-file.mjs', VLM_FILE_MJS)
       const node = await resolveExe(sub, 'node', 'C:\\Program Files\\nodejs\\node.exe')
       const ps = await resolveExe(sub, 'powershell', 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe')
+      const osa = await resolveExe(sub, 'osascript', '/usr/bin/osascript')
+      const platform = (process.platform || '').toLowerCase()
       const parts = []
       const failures = []
 
-      // 1) OCR:每张图独立(并行),失败只记原因不中断
+      // 1) OCR:逐图,平台自适应(WinRT 走 stdin,macOS Vision 读文件),失败只记原因不中断
       if (cfg.ocr !== false) {
         const ocrPerImage = await Promise.all(refs.map(async (ref) => {
-          const conv = await runSub(sub, [node, toPngPath, ref.attachmentId], 16 * 1024 * 1024)
-          const pngB64 = conv.stdout.trim()
-          if (conv.exitCode !== 0 || !pngB64) {
-            return { ok: false, reason: '[图片转换失败: exit=' + conv.exitCode + ' stderr=' + (conv.stderr.trim() || '(empty)') + ']' }
+          if (platform === 'win32') {
+            const conv = await runSub(sub, [node, toPngPath, ref.attachmentId], 16 * 1024 * 1024)
+            const pngB64 = conv.stdout.trim()
+            if (conv.exitCode !== 0 || !pngB64) {
+              return { ok: false, reason: '[图片转换失败: exit=' + conv.exitCode + ' stderr=' + (conv.stderr.trim() || '(empty)') + ']' }
+            }
+            const r = await runSub(sub, [ps, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ocrPs1], 1000000, pngB64)
+            const out = r.stdout.trim()
+            if (out === '__OCR_UNAVAILABLE__') return { ok: false, reason: '[OCR 不可用: 系统未安装 OCR 语言包]' }
+            if (r.exitCode !== 0 && out.startsWith('__OCR_ERROR__')) return { ok: false, reason: out }
+            return { ok: true, text: out }
           }
-          const r = await runSub(sub, [ps, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ocrPs1], 1000000, pngB64)
-          const out = r.stdout.trim()
-          if (out === '__OCR_UNAVAILABLE__') return { ok: false, reason: '[OCR 不可用: 系统未安装 OCR 语言包]' }
-          if (r.exitCode !== 0 && out.startsWith('__OCR_ERROR__')) return { ok: false, reason: out }
-          return { ok: true, text: out }
+          if (platform === 'darwin') {
+            const file = resolveSrcPath(ref.attachmentId)
+            const r = await runSub(sub, [osa, '-l', 'JavaScript', '-e', MACOS_VISION_JXA, file], 4 * 1024 * 1024)
+            if (r.exitCode !== 0) return { ok: false, reason: '[macOS Vision OCR 失败: exit=' + r.exitCode + ' stderr=' + (r.stderr.trim() || '(empty)') + ']' }
+            let parsed = null
+            try { parsed = JSON.parse(r.stdout.trim()) } catch (e) {}
+            const items = parsed && Array.isArray(parsed.items) ? parsed.items : []
+            if (!parsed || items.length === 0) return { ok: false, reason: '[macOS Vision OCR 未识别到文字]' }
+            return { ok: true, text: items.join('\n') }
+          }
+          return { ok: false, reason: '[OCR 不支持平台: ' + platform + '(仅 Windows WinRT / macOS Vision)]' }
         }))
         if (refs.length === 1) {
           const one = ocrPerImage[0]
