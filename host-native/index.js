@@ -177,11 +177,12 @@ module.exports = {
   // Cordis inject:声明硬依赖,所有服务就绪后才执行 apply。
   // 不能用 ctx.get() 拿服务(启动早期服务未注册会静默失败)——这是
   // 重启后"不自动启动"的根因,参考 dsh-vision 的 inject: ["llm", ...]。
-  inject: ['fs', 'sandboxPolicy', 'llm', 'subprocess', 'timer', 'tools'],
+  inject: ['fs', 'sandboxPolicy', 'llm', 'subprocess', 'timer', 'tools', 'credentials'],
   apply(ctx) {
     const fs = ctx.fs
     const sandboxPolicy = ctx.sandboxPolicy
     const llm = ctx.llm
+    const credentials = ctx.credentials
 
     const policy = sandboxPolicy.resolve()
     const root = policy.workspaceRoot || sandboxPolicy.workspaceRoot
@@ -217,12 +218,44 @@ module.exports = {
       return fs.processPath(t)
     }
 
+    // 配置解析:优先官方 credentials 服务(设置卡片 UI 写入),回退 .eye/eye.config.json。
+    // credentials refs:EYE_VLM_URL / EYE_VLM_MODEL / EYE_VLM_API_KEY / EYE_VLM_PROMPT / EYE_OCR
+    const CRED_REFS = {
+      url: 'EYE_VLM_URL',
+      model: 'EYE_VLM_MODEL',
+      apiKey: 'EYE_VLM_API_KEY',
+      prompt: 'EYE_VLM_PROMPT',
+      ocr: 'EYE_OCR',
+    }
     const loadConfig = async () => {
       const cfgTarget = await fs.resolve('.eye/eye.config.json', { cwd: root })
       let cfg = {}
       const cfgInfo = await fs.stat(cfgTarget)
       if (cfgInfo) { try { cfg = JSON.parse(await fs.readText(cfgTarget)) } catch (e) { cfg = {} } }
       else { await fs.writeText(cfgTarget, '{\n  "vlm": { "url": "", "model": "", "apiKey": "" },\n  "ocr": true\n}\n', undefined, undefined, policy) }
+      // credentials 覆盖文件配置(UI 保存的优先级更高)
+      if (credentials) {
+        const vlm = { ...(cfg.vlm || {}) }
+        const pairs = [
+          ['url', CRED_REFS.url],
+          ['model', CRED_REFS.model],
+          ['apiKey', CRED_REFS.apiKey],
+          ['prompt', CRED_REFS.prompt],
+        ]
+        for (const [field, ref] of pairs) {
+          try {
+            const hit = await credentials.resolve(ref)
+            if (hit && typeof hit.value === 'string' && hit.value.trim() !== '') vlm[field] = hit.value.trim()
+          } catch (e) {}
+        }
+        if (Object.keys(vlm).length > 0) cfg.vlm = vlm
+        try {
+          const ocrHit = await credentials.resolve(CRED_REFS.ocr)
+          if (ocrHit && typeof ocrHit.value === 'string' && (ocrHit.value === 'true' || ocrHit.value === 'false')) {
+            cfg.ocr = ocrHit.value === 'true'
+          }
+        } catch (e) {}
+      }
       return { cfg, cfgPath: fs.processPath(cfgTarget) }
     }
 
