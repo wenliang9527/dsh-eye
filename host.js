@@ -9,7 +9,8 @@ return {
   apply(ctx) {
     const fs = ctx.get('fs')
     const sandboxPolicy = ctx.get('sandboxPolicy')
-    if (fs === undefined || sandboxPolicy === undefined) return
+    const llm = ctx.get('llm')
+    if (fs === undefined || sandboxPolicy === undefined || llm === undefined) return
 
     // ---- Windows WinRT OCR 脚本(stdin 收 base64,PowerShell 5.1)----
     const OCR_STDIN_PS1 = [
@@ -179,7 +180,43 @@ return {
       return parts.length > 0 ? parts.join('\n') : '[eye: 无可用的视觉路径]'
     }
 
-    // ---------- llm/stream 拦截:图片块 → eye 文本(聊天上传即可用) ----------
+    // ---------- 虚拟模型提供商 eye-vision:声称支持图片,转发给 deepseek ----------
+    // 模型选择器里选 eye-vision 后,发送受理门的 resolveModelInfo 检查通过,
+    // 图片消息进入 llm/stream,由下方拦截转文本,再转发给真实的 deepseek 适配器
+    const VISION_PROVIDER = 'eye-vision'
+    const TARGET_PROVIDER = 'deepseek'
+
+    const visionAdapter = {
+      providerInfo(provider) {
+        return { id: provider, name: 'eye 视觉桥(deepseek)' }
+      },
+      providerRetryPolicy() {},
+      async listModels(provider) {
+        try {
+          const models = await llm.listModels(TARGET_PROVIDER)
+          return Array.isArray(models) ? models : []
+        } catch (e) { return [] }
+      },
+      async resolveModel(provider, model, signal) {
+        let base = null
+        try { base = await llm.resolveModelInfo(TARGET_PROVIDER, model, signal) } catch (e) {}
+        return {
+          provider,
+          id: model,
+          name: model,
+          inputModalities: ['text', 'image'],
+          ...(base && base.context ? { context: base.context } : {}),
+          ...(base && base.defaultMaxTokens !== undefined ? { defaultMaxTokens: base.defaultMaxTokens } : {}),
+          ...(base && base.reasoning ? { reasoning: base.reasoning } : {}),
+        }
+      },
+      async *stream(options) {
+        yield* llm.stream({ ...options, provider: TARGET_PROVIDER })
+      },
+    }
+    disposers.push(llm.registerAdapter([VISION_PROVIDER], visionAdapter))
+
+    // ---------- llm/stream 拦截:图片块 → eye 文本 ----------
     // 注意:waterfall 调度器对监听器做 yield*(listener(...)),监听器必须返回异步可迭代对象,
     // 因此必须是 async generator(普通 async 函数返回 Promise 会报 "not async iterable")
     const onLlmStream = async function* (options, next) {
@@ -187,14 +224,14 @@ return {
         const messages = options && Array.isArray(options.messages) ? options.messages : []
         const hasImage = messages.some((m) => Array.isArray(m.content) && m.content.some((b) => b && b.type === 'image'))
         if (!hasImage) { yield* next(); return }
-        const llm = ctx.get('llm')
-        const attachments = ctx.get('attachments')
-        if (llm === undefined || attachments === undefined) { yield* next(); return }
-        // 路由门控:目标模型本身支持图片则放行给原生多模态
+        // 路由门控:看真正执行模型(eye-vision 会转发给 deepseek)是否支持图片
+        const effectiveProvider = options.provider === VISION_PROVIDER ? TARGET_PROVIDER : options.provider
         try {
-          const info = await llm.resolveModelInfo(options.provider, options.model)
+          const info = await llm.resolveModelInfo(effectiveProvider, options.model)
           if (info && Array.isArray(info.inputModalities) && info.inputModalities.includes('image')) { yield* next(); return }
         } catch (e) {}
+        const attachments = ctx.get('attachments')
+        if (attachments === undefined) { yield* next(); return }
         const { cfg, cfgPath } = await loadConfig()
         const transformed = []
         for (const message of messages) {

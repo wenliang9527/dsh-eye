@@ -8,13 +8,17 @@
 
 对模型说"看一下 `<图片路径>`",eye 读文件 → OCR + VLM → 返回纯文本描述。
 
-### 2. llm/stream 拦截(聊天上传图片,突破"图片发不出去"的限制)
+### 2. eye-vision 虚拟模型(聊天上传图片,突破"当前模型不支持"限制)
 
-在模型调用瀑布里拦截:检测到消息含 image 内容块 → 从附件服务取图片字节 → OCR + VLM 转文本 → 用转换后的文本消息重入 `llm.stream`。
+聊天上传的图片在**发送受理门**就被拒绝(API proxy 检查当前模型 `inputModalities`,纯文本模型直接打回)。eye 注册了一个虚拟提供商 **`eye-vision`**(声称支持图片,流式调用原样转发给 deepseek):
 
-- **图片本身仍显示在会话里**(历史保留),模型收到的是文本描述
-- **路由门控**:目标模型本身支持图片(`inputModalities` 含 image)时直接放行,不拦截
-- 纯文本模型(DeepSeek 适配器)不再因为 image 块抛 `UNSUPPORTED_CONTENT`
+1. `cordis_define` 装好插件后,**打开模型选择器,选择 "eye 视觉桥(deepseek)" 提供商下的模型**(如 deepseek-chat)
+2. 之后聊天框直接上传图片发送:发送门放行 → `llm/stream` 拦截把图片转成 OCR+VLM 文本 → 转发给 deepseek 执行
+3. 图片本身仍显示在会话里,模型收到的是文本描述
+
+- 转发使用 deepseek 自己的凭据,无需额外配置
+- 推理等级等元数据从 deepseek 镜像,行为一致
+- 卸载 eye 后记得在模型选择器切回 deepseek(eye-vision 会失效)
 
 ## 原理(WorkBuddy 同款架构)
 
