@@ -102,11 +102,15 @@ npx @deepseek-ai/dsh plugin --profile web add github:wenliang9527/dsh-eye
 
 1. 打开 **设置 → 插件 → 👁 eye 视觉桥**
 2. 填写:
+   - **预置提供商**(下拉):选「智谱 GLM-4V-Flash(免费)」等,自动填充 URL + 模型名
    - **VLM API 地址**:`https://open.bigmodel.cn/api/paas/v4/chat/completions`(智谱)
    - **视觉模型**:`glm-4v-flash`(智谱免费档)/ `qwen-vl-plus`(阿里百炼)等
    - **API Key**:你的 Key
-3. 点「保存」→ 各项显示「已配置」
-4. API Key 走**官方凭据服务**单向写入,界面不读回明文,不落仓库
+3. 点「测试连接」(仅**会话版**设置页有此按钮):发起一次真实 VLM 请求(1x1 测试图),显示连接成功/失败与延迟
+4. 点「保存」→ 各项显示「已配置」
+5. API Key 走**官方凭据服务**单向写入,界面不读回明文,不落仓库(永久版);会话版为 `.eye/eye.config.json` 文件明文
+
+> ⚠️ **永久版(host-native)无「测试连接」按钮**:原生 bundle 插件没有 host RPC 通道(harness.handle 仅会话级动态插件可用),无法由 UI 触发 host 执行;验证方式为保存后直接拖一张图到聊天发送。会话版有完整的一键测试。
 
 > 💡 凭据模式说明:**永久版**(方式二/三)设置卡片走官方 credentials 服务(单向写、UI 不读回明文);**会话版**(方式一)`client.js` 设置页读写工作区 `.eye/eye.config.json`(文件明文)。两者配置互通:host 端 `loadConfig` 一律优先读 credentials,其次读文件——永久版与会话版同时存在时以凭据服务为准。
 
@@ -167,5 +171,6 @@ npx @deepseek-ai/dsh plugin --profile web add github:wenliang9527/dsh-eye
 
 | 文件 | 说明 |
 |---|---|
-| `host.js` / `client.js` | 会话级动态插件源码(完整功能:设置页 + 按钮 + 工具,能力与永久版对齐) |
-| `host-native/` | 永久版原生插件包(仅 Host 核心,零依赖,含 `cordis.patch.yml` bundle 声明;`client.js` 为设置卡片,凭据单向写) |
+| `host.js` / `client.js` | 会话级动态插件源码(完整功能:设置页 + 测试连接按钮 + 预置模板 + 按钮 + 工具,能力与永久版对齐) |
+| `host-native/` | 永久版原生插件包(仅 Host 核心,零依赖,含 `cordis.patch.yml` bundle 声明;`client.js` 为设置卡片,凭据单向写,含预置模板;无测试 RPC) |
+| `TESTING.md` | 实测检查清单:安装后的分步验证项 + 常见失败排查表 |

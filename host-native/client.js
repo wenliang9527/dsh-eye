@@ -30,6 +30,15 @@ window.__ModuleLoader__.load({
       { key: 'prompt', label: '描述提示词(可选)', placeholder: '留空用默认提示词', secret: false },
     ]
 
+    // 预置提供商模板:选中自动填充 URL + 模型名(不触碰 API Key)
+    const VLM_PRESETS = [
+      { label: '自定义(手动填写)', url: '', model: '' },
+      { label: '智谱 GLM-4V-Flash(免费)', url: 'https://open.bigmodel.cn/api/paas/v4/chat/completions', model: 'glm-4v-flash' },
+      { label: '通义千问 qwen-vl-plus', url: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions', model: 'qwen-vl-plus' },
+      { label: '硅基流动 Qwen2.5-VL', url: 'https://api.siliconflow.cn/v1/chat/completions', model: 'Qwen/Qwen2.5-VL-7B-Instruct' },
+      { label: 'Kimi moonshot-vision', url: 'https://api.moonshot.cn/v1/chat/completions', model: 'moonshot-v1-8k-vision-preview' },
+    ]
+
     return {
       inject: ['slots', 'connection'],
       apply(ctx) {
@@ -72,6 +81,14 @@ window.__ModuleLoader__.load({
           }, [open, loaded])
 
           const setDraft = (key, value) => setDrafts((current) => ({ ...current, [key]: value }))
+
+          const onPreset = (e) => {
+            const preset = VLM_PRESETS.find((p) => p.label === e.target.value)
+            if (preset && preset.url) {
+              setDrafts((current) => ({ ...current, url: preset.url, model: preset.model }))
+              if (status !== '') setStatus('')
+            }
+          }
 
           const save = () => {
             const writes = []
@@ -192,6 +209,28 @@ window.__ModuleLoader__.load({
             }, status === 'saving' ? '保存中…' : status === 'saved' ? '已保存 ✓' : status.slice(6))
           })()
 
+          const presetRow = React.createElement('div', {
+            style: { display: 'flex', flexDirection: 'column', gap: 6, padding: '12px 0' },
+          },
+            React.createElement('label', { style: { color: 'var(--dsw-alias-label-primary)', fontSize: 13, fontWeight: 500 } }, '预置提供商(自动填充 URL + 模型名)'),
+            React.createElement('select', {
+              value: '自定义(手动填写)',
+              onChange: onPreset,
+              style: {
+                boxSizing: 'border-box', width: '100%', height: 34,
+                border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 8,
+                padding: '0 12px', background: 'var(--dsw-alias-bg-layer-3)',
+                color: 'var(--dsw-alias-label-primary)', font: 'inherit', fontSize: 13,
+              },
+            },
+              VLM_PRESETS.map((p) => React.createElement('option', { key: p.label, value: p.label }, p.label)),
+            ),
+          )
+
+          const verifyHint = React.createElement('p', {
+            style: { margin: 0, fontSize: 12, color: 'var(--dsw-alias-label-tertiary)', lineHeight: 1.5 },
+          }, '💡 验证:保存后拖一张图片到聊天发送,模型能描述图片即生效')
+
           const footer = React.createElement('div', {
             style: {
               display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8,
@@ -232,8 +271,10 @@ window.__ModuleLoader__.load({
           },
             header,
             React.createElement('div', { style: { margin: '0 16px', borderTop: '1px solid var(--dsw-alias-border-l2)', paddingBottom: 8 } },
+              presetRow,
               FIELDS.map(field),
               ocrRow,
+              verifyHint,
               footer,
             ),
           )

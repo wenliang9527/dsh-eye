@@ -48,7 +48,7 @@ return {
       '  .png()',
       '  .toBuffer()',
       "stdout.write(outBuf.toString('base64'))",
-    ].join('\n') + '\n'
+    ].join('\n') + '\n' // @eye-script-end REF_TO_PNG_B64_MJS
 
     // ---- powershell:stdin 收 base64 → 写【自己进程】$env:TEMP(沙箱临时目录)→ WinRT OCR ----
     // 关键2:WinRT GetFileFromPathAsync 对工作区路径会触发沙箱 UNABLE_TO_MASK_PATH 遮蔽 bug,
@@ -151,7 +151,7 @@ return {
       'const text = typeof c === "string" ? c : (Array.isArray(c) ? c.filter((p) => p && p.type === "text").map((p) => p.text || "").join("\\n") : "")',
       "if (typeof text !== 'string' || text.trim() === '') { console.error('VLM 响应缺少 choices[0].message.content'); process.exit(2) }",
       'console.log(text)',
-    ].join('\n') + '\n'
+    ].join('\n') + '\n' // @eye-script-end VLM_FILE_MJS
 
     // ---- macOS Vision OCR(JXA + ObjC bridge,仅 darwin 平台使用)----
     const MACOS_VISION_JXA = [
@@ -199,6 +199,25 @@ return {
       '  });',
       '}',
     ].join('\n') + '\n'
+
+    // ---- node:VLM 连通性测试(1x1 PNG 真实请求,供设置页"测试连接"按钮)----
+    // argv = [url, model, apiKey, prompt?];成功 stdout 输出 JSON { ok, latencyMs, reply }
+    const VLM_TEST_MJS = [
+      "import { stdout } from 'node:process'",
+      'const [url, model, apiKey, prompt] = process.argv.slice(2)',
+      "if (!url || !model || !apiKey) { console.error('__VLM_TEST_ERROR__: 缺少 url/model/apiKey'); process.exit(3) }",
+      "const PNG_1X1 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='",
+      "const text = (prompt && prompt.trim()) ? prompt.trim() : '这是一张 1x1 测试图片,请只回复:eye-ok'",
+      'const start = Date.now()',
+      'try {',
+      '  const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json", "Authorization": "Bearer " + apiKey }, body: JSON.stringify({ model, messages: [{ role: "user", content: [{ type: "text", text }, { type: "image_url", image_url: { url: "data:image/png;base64," + PNG_1X1 } }] }], max_tokens: 16 }), signal: AbortSignal.timeout(20000) })',
+      '  if (!res.ok) { const body = (await res.text()).slice(0, 400); console.error(`__VLM_TEST_ERROR__: HTTP ${res.status} ${body}`); process.exit(2) }',
+      '  const json = await res.json()',
+      '  const c = json && json.choices && json.choices[0] && json.choices[0].message && json.choices[0].message.content',
+      '  const reply = typeof c === "string" ? c : (Array.isArray(c) ? c.filter((p) => p && p.type === "text").map((p) => p.text || "").join("\\n") : "")',
+      '  stdout.write(JSON.stringify({ ok: true, latencyMs: Date.now() - start, reply: String(reply || "").slice(0, 200) }))',
+      '} catch (err) { console.error("__VLM_TEST_ERROR__: " + String(err && err.message ? err.message : err)); process.exit(2) }',
+    ].join('\n') + '\n' // @eye-script-end VLM_TEST_MJS
 
     const policy = sandboxPolicy.resolve()
     const root = policy.workspaceRoot || sandboxPolicy.workspaceRoot
@@ -289,6 +308,30 @@ return {
       } catch (err) {
         return { ok: false, error: String(err && err.message ? err.message : err) }
       }
+    }))
+
+    // ---- 测试连接 RPC:用表单当前值(未保存也可)发起一次真实 VLM 请求 ----
+    disposers.push(harness.handle('eye.testVlm', async (args) => {
+      try {
+        const vlm = (args && args.vlm) || {}
+        const url = String(vlm.url || '').trim()
+        const model = String(vlm.model || '').trim()
+        const apiKey = String(vlm.apiKey || '').trim()
+        if (!url || !model || !apiKey) return { ok: false, error: '请先填写接口地址 / 模型名称 / API Key' }
+        const sub = ctx.get('subprocess')
+        if (sub === undefined) return { ok: false, error: 'subprocess 服务不可用' }
+        const testMjs = await ensure('eye-vlm-test.mjs', VLM_TEST_MJS)
+        const node = await resolveExe(sub, 'node', 'C:\\Program Files\\nodejs\\node.exe')
+        const r = await runSub(sub, [node, testMjs, url, model, apiKey, String(vlm.prompt || '')], 2 * 1024 * 1024)
+        if (r.exitCode === 0 && r.stdout.trim()) {
+          try {
+            const parsed = JSON.parse(r.stdout.trim())
+            return { ok: true, latencyMs: parsed.latencyMs, reply: parsed.reply }
+          } catch (e) { return { ok: true, reply: r.stdout.trim() } }
+        }
+        const stderr = r.stderr.trim()
+        return { ok: false, error: stderr.startsWith('__VLM_TEST_ERROR__') ? stderr.replace('__VLM_TEST_ERROR__: ', '') : (stderr || 'exit ' + r.exitCode) }
+      } catch (err) { return { ok: false, error: String(err && err.message ? err.message : err) } }
     }))
 
     // 把 sha256: 附件引用解析为绝对路径(供 macOS Vision 直接读文件;WinRT 走 stdin 不需要)

@@ -9,11 +9,19 @@ return {
     const slots = ctx.get('slots')
     if (slots === undefined) return
 
-    // ---- 设置页:eye 视觉桥(配置 VLM key/模型名)----
+    // ---- 设置页:eye 视觉桥(配置 VLM key/模型名 + 预置提供商 + 测试连接)----
+    const VLM_PRESETS = [
+      { label: '自定义(手动填写)', url: '', model: '' },
+      { label: '智谱 GLM-4V-Flash(免费)', url: 'https://open.bigmodel.cn/api/paas/v4/chat/completions', model: 'glm-4v-flash' },
+      { label: '通义千问 qwen-vl-plus', url: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions', model: 'qwen-vl-plus' },
+      { label: '硅基流动 Qwen2.5-VL', url: 'https://api.siliconflow.cn/v1/chat/completions', model: 'Qwen/Qwen2.5-VL-7B-Instruct' },
+      { label: 'Kimi moonshot-vision', url: 'https://api.moonshot.cn/v1/chat/completions', model: 'moonshot-v1-8k-vision-preview' },
+    ]
     const EyeSettings = () => {
       const [vlm, setVlm] = React.useState({ url: '', model: '', apiKey: '' })
       const [ocr, setOcr] = React.useState(true)
       const [status, setStatus] = React.useState('')
+      const [testing, setTesting] = React.useState(false)
       React.useEffect(() => {
         host.call('eye.loadConfig', {}).then((r) => {
           if (!r) return
@@ -28,15 +36,38 @@ return {
           setStatus(r && r.ok ? '已保存 ✓(立即生效)' : '保存失败: ' + (r && r.error ? r.error : 'unknown'))
         } catch (e) { setStatus('异常: ' + String(e && e.message ? e.message : e)) }
       }
+      const test = async () => {
+        if (testing) return
+        setTesting(true)
+        setStatus('测试中...')
+        try {
+          const r = await host.call('eye.testVlm', { vlm: { url: vlm.url.trim(), model: vlm.model.trim(), apiKey: vlm.apiKey.trim() } })
+          if (r && r.ok) setStatus('连接成功 ✓ 延迟 ' + r.latencyMs + 'ms,模型回复: ' + (r.reply || '(空)'))
+          else setStatus('连接失败: ' + (r && r.error ? r.error : 'unknown'))
+        } catch (e) { setStatus('异常: ' + String(e && e.message ? e.message : e)) }
+        setTesting(false)
+      }
+      const onPreset = (e) => {
+        const preset = VLM_PRESETS.find((p) => p.label === e.target.value)
+        if (preset && preset.url) setVlm({ ...vlm, url: preset.url, model: preset.model })
+      }
       const row = (label, value, onChange, type) => React.createElement('label', { style: { display: 'block', margin: '10px 0', fontSize: 13, color: '#333' } },
         label,
         React.createElement('input', { type: type || 'text', value, onChange, style: { display: 'block', width: '100%', boxSizing: 'border-box', marginTop: 4, padding: '6px 8px', fontSize: 13, border: '1px solid #ccc', borderRadius: 6 } }),
       )
+      const presetEl = React.createElement('label', { style: { display: 'block', margin: '10px 0', fontSize: 13, color: '#333' } },
+        '预置提供商(选中自动填充 URL + 模型名)',
+        React.createElement('select', { value: '自定义(手动填写)', onChange: onPreset, style: { display: 'block', width: '100%', boxSizing: 'border-box', marginTop: 4, padding: '6px 8px', fontSize: 13, border: '1px solid #ccc', borderRadius: 6, background: '#fff' } },
+          VLM_PRESETS.map((p) => React.createElement('option', { key: p.label, value: p.label }, p.label)),
+        ),
+      )
       const saveBtn = React.createElement('button', { onClick: save, style: { marginTop: 8, padding: '6px 16px', cursor: 'pointer', fontSize: 13 } }, '保存')
+      const testBtn = React.createElement('button', { onClick: test, disabled: testing, style: { marginTop: 8, marginLeft: 8, padding: '6px 16px', cursor: 'pointer', fontSize: 13 } }, testing ? '测试中...' : '测试连接')
       const statusEl = status ? React.createElement('div', { style: { marginTop: 8, fontSize: 12, color: status.indexOf('✓') >= 0 ? '#2e7d32' : '#c62828' } }, status) : null
       return React.createElement('div', { style: { maxWidth: 420, padding: '4px 2px' } },
         React.createElement('h3', { style: { margin: '0 0 4px', fontSize: 15 } }, 'eye 视觉桥设置'),
         React.createElement('div', { style: { fontSize: 12, color: '#666', marginBottom: 8 } }, '配置一个支持视觉的模型(OpenAI 兼容接口),图片识别会更准确(OCR + VLM 双路径)。留空则仅使用本地 OCR。'),
+        presetEl,
         row('接口地址 URL(如 https://xxx/v1/chat/completions)', vlm.url, (e) => setVlm({ ...vlm, url: e.target.value })),
         row('模型名称 model(如 glm-4v / qwen-vl-plus)', vlm.model, (e) => setVlm({ ...vlm, model: e.target.value })),
         row('API Key', vlm.apiKey, (e) => setVlm({ ...vlm, apiKey: e.target.value }), 'password'),
@@ -44,7 +75,7 @@ return {
           React.createElement('input', { type: 'checkbox', checked: ocr, onChange: (e) => setOcr(e.target.checked) }),
           '启用本地 OCR(Windows 自带,免费)',
         ),
-        saveBtn,
+        React.createElement('div', { style: { display: 'flex', alignItems: 'center' } }, saveBtn, testBtn),
         statusEl,
       )
     }
