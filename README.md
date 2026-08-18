@@ -18,6 +18,7 @@ eye 是一个 DeepSeek Harness 插件,让**纯文本模型也能看图**:
 | 💬 **关注点跟随** | 把用户最近的问题原样传给视觉模型,围绕需求回答 |
 | 🔐 **安全注入** | 视觉结果标记为「非可信观察数据」,防图片提示词注入 |
 | 🧠 **结果缓存** | 同图 + 同问题不重复调用 OCR/VLM,省时省钱 |
+| ⚡ **OCR/VLM 并行** | 本地 OCR 与在线 VLM 同时执行,不串行等待 |
 | 💻 **跨平台 OCR** | Windows 用系统 WinRT(免费),macOS 用系统 Vision(免费) |
 
 ---
@@ -35,7 +36,7 @@ eye 是一个 DeepSeek Harness 插件,让**纯文本模型也能看图**:
 
 ### 安装方式一:会话级(快速试用,2 分钟)
 
-适用于任何 DSH 用户,**重启后需重装**。
+适用于任何 DSH 用户,**重启后需重装**。会话版与永久版(Host 核心)功能对齐:多图合并、结果缓存、安全上下文、关注点跟随、macOS OCR 均已包含。
 
 1. 把本仓库 `host.js` 内容给 AI:`cordis_define`(新建插件,`idPrefix: "eye"`,`code.host` ← host.js,`code.client` ← client.js)
 2. `cordis_run` 激活,在界面批准
@@ -107,6 +108,8 @@ npx @deepseek-ai/dsh plugin --profile web add github:wenliang9527/dsh-eye
 3. 点「保存」→ 各项显示「已配置」
 4. API Key 走**官方凭据服务**单向写入,界面不读回明文,不落仓库
 
+> 💡 凭据模式说明:**永久版**(方式二/三)设置卡片走官方 credentials 服务(单向写、UI 不读回明文);**会话版**(方式一)`client.js` 设置页读写工作区 `.eye/eye.config.json`(文件明文)。两者配置互通:host 端 `loadConfig` 一律优先读 credentials,其次读文件——永久版与会话版同时存在时以凭据服务为准。
+
 ### 方式二:配置文件(`.eye/eye.config.json`,工作区根目录,首次调用自动生成)
 
 ```json
@@ -164,5 +167,5 @@ npx @deepseek-ai/dsh plugin --profile web add github:wenliang9527/dsh-eye
 
 | 文件 | 说明 |
 |---|---|
-| `host.js` / `client.js` | 会话级动态插件源码(完整功能:设置页 + 按钮 + 工具) |
-| `host-native/` | 永久版原生插件包(仅 Host 核心,零依赖,含 `cordis.patch.yml` bundle 声明) |
+| `host.js` / `client.js` | 会话级动态插件源码(完整功能:设置页 + 按钮 + 工具,能力与永久版对齐) |
+| `host-native/` | 永久版原生插件包(仅 Host 核心,零依赖,含 `cordis.patch.yml` bundle 声明;`client.js` 为设置卡片,凭据单向写) |

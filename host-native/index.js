@@ -270,7 +270,7 @@ module.exports = {
       return src
     }
 
-    // ---- 视觉分析核心:多图,OCR 逐图 + VLM 一次合并,失败聚合 ----
+    // ---- 视觉分析核心:多图,OCR 逐图并行 + VLM 一次合并(OCR/VLM 并行),失败聚合 ----
     // refs: [{ attachmentId, mediaType }]
     const describeImages = async (refs, task, cfg, cfgPath) => {
       const sub = ctx.subprocess
@@ -284,9 +284,11 @@ module.exports = {
       const platform = (process.platform || '').toLowerCase()
       const parts = []
       const failures = []
+      const vlmConfigured = !!(cfg.vlm && cfg.vlm.url && cfg.vlm.model && cfg.vlm.apiKey)
 
-      // 1) OCR:逐图,平台自适应(WinRT 走 stdin,macOS Vision 读文件),失败只记原因不中断
-      if (cfg.ocr !== false) {
+      // 1) OCR:逐图并行,平台自适应(WinRT 走 stdin,macOS Vision 读文件),失败只记原因不中断
+      const ocrJob = (async () => {
+        if (cfg.ocr === false) return
         const ocrPerImage = await Promise.all(refs.map(async (ref) => {
           if (platform === 'win32') {
             const conv = await runSub(sub, [node, toPngPath, ref.attachmentId], 16 * 1024 * 1024)
@@ -297,7 +299,8 @@ module.exports = {
             const r = await runSub(sub, [ps, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ocrPs1], 1000000, pngB64)
             const out = r.stdout.trim()
             if (out === '__OCR_UNAVAILABLE__') return { ok: false, reason: '[OCR 不可用: 系统未安装 OCR 语言包]' }
-            if (r.exitCode !== 0 && out.startsWith('__OCR_ERROR__')) return { ok: false, reason: out }
+            if (r.exitCode !== 0 || out.startsWith('__OCR_ERROR__')) return { ok: false, reason: out.startsWith('__OCR_ERROR__') ? out : '[OCR 失败: exit=' + r.exitCode + ' stderr=' + (r.stderr.trim() || '(empty)') + ']' }
+            if (out === '') return { ok: false, reason: '[OCR 未识别到文字(图片可能是纯图形/照片)]' }
             return { ok: true, text: out }
           }
           if (platform === 'darwin') {
@@ -322,15 +325,17 @@ module.exports = {
             else failures.push('[图片 ' + (index + 1) + '] ' + one.reason)
           })
         }
-      }
+      })()
 
-      // 2) VLM:一次请求合并全部图片
-      if (cfg.vlm && cfg.vlm.url && cfg.vlm.model && cfg.vlm.apiKey) {
+      // 2) VLM:一次请求合并全部图片(与 OCR 并行执行)
+      const vlmJob = (async () => {
+        if (!vlmConfigured) return
         const r = await runSub(sub, [node, vlmMjs, (refs[0] && refs[0].mediaType) || 'image/png', cfgPath, task || '', ...refs.map((ref) => ref.attachmentId)], 4000000)
         if (r.exitCode === 0 && r.stdout.trim()) parts.push(r.stdout.trim())
         else failures.push('[VLM 失败: ' + (r.stderr.trim() || 'exit ' + r.exitCode) + ']')
-      }
+      })()
 
+      await Promise.all([ocrJob, vlmJob])
       const text = parts.length > 0 ? parts.join('\n\n') : (failures.length > 0 ? failures.join('\n') : '[eye: 无可用的视觉路径]')
       return { text, failures }
     }
@@ -341,7 +346,7 @@ module.exports = {
     const cacheKeyFor = (refs, task, cfg) => {
       const ids = refs.map((ref) => String(ref.attachmentId)).sort().join(',')
       const vlm = cfg.vlm || {}
-      return JSON.stringify([ids, task || '', cfg.ocr !== false, vlm.url || '', vlm.model || ''])
+      return JSON.stringify([ids, task || '', cfg.ocr !== false, vlm.url || '', vlm.model || '', vlm.prompt || ''])
     }
     const cachedDescribe = async (refs, task, cfg, cfgPath) => {
       const key = cacheKeyFor(refs, task, cfg)

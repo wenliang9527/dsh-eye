@@ -82,6 +82,24 @@ return {
           setState({ idle: false, busy: false, text: '当前=' + current + ' | 组=' + groups + (failures ? ' | 失败=' + failures : '') })
         } catch (err) { setState({ idle: false, busy: false, text: '异常: ' + String(err && err.message || err) }) }
       }
+      // 切换目标模型:优先沿用当前会话模型,其次取 eye-vision 组首个模型,兜底默认
+      const resolveSwitchModel = async (sessions, sessionId, fallback) => {
+        try {
+          const { result } = await sessions.models({ sessionId })
+          if (result && result.ok) {
+            const cur = result.value && result.value.current
+            if (cur && cur.model) return cur.model
+            if (Array.isArray(result.value.groups)) {
+              const group = result.value.groups.find((g) => g.id === 'eye-vision')
+              if (group && Array.isArray(group.models) && group.models.length > 0) {
+                const first = group.models[0]
+                return (first && (first.id || first.model)) || fallback
+              }
+            }
+          }
+        } catch (e) {}
+        return fallback
+      }
       const onSwitch = async () => {
         if (state.busy) return
         const sessions = api()
@@ -89,8 +107,13 @@ return {
         if (!sessions || !sessionId) return
         setState({ idle: false, busy: true, text: '切换中...' })
         try {
-          const { result } = await sessions.selectModel({ sessionId, provider: 'eye-vision', model: 'deepseek-v4-flash' })
-          setState({ idle: false, busy: false, text: result.ok ? '已切换到 eye-vision/deepseek-v4-flash ✓' : '切换失败: ' + (result.error ? result.error.code + ': ' + result.error.message : 'no response') })
+          const model = await resolveSwitchModel(sessions, sessionId, 'deepseek-v4-flash')
+          const { result } = await sessions.selectModel({ sessionId, provider: 'eye-vision', model })
+          if (result && result.ok) {
+            setState({ idle: false, busy: false, text: '已切换到 eye-vision/' + model + ' ✓ 现在可以拖图发送' })
+          } else {
+            setState({ idle: false, busy: false, text: '切换失败: ' + (result && result.error ? result.error.code + ': ' + result.error.message : 'no response') })
+          }
         } catch (err) { setState({ idle: false, busy: false, text: '异常: ' + String(err && err.message || err) }) }
       }
       const base = { margin: '0 4px', padding: '3px 8px', cursor: 'pointer', fontSize: 12, whiteSpace: 'nowrap' }
