@@ -20,6 +20,7 @@ const REF_TO_PNG_B64_MJS = [
   "import path from 'node:path'",
   "import { stdout } from 'node:process'",
   'const [src] = process.argv.slice(2)',
+  'const isUrl = typeof src === \'string\' && /^https?:\\/\\//i.test(src)',
   'const resolveSrc = (s) => {',
   "  if (typeof s === 'string' && s.startsWith('sha256:')) {",
   "    const hex = s.slice(7)",
@@ -28,15 +29,22 @@ const REF_TO_PNG_B64_MJS = [
   '  }',
   '  return s',
   '}',
-  'const file = resolveSrc(src)',
-  "if (!existsSync(file)) { console.error('file not found: ' + file); process.exit(2) }",
-  'const buf = readFileSync(file)',
+  'let buf',
+  'if (isUrl) {',
+  '  const res = await fetch(src, { signal: AbortSignal.timeout(30000) })',
+  "  if (!res.ok) { console.error('download failed: HTTP ' + res.status); process.exit(2) }",
+  '  buf = Buffer.from(await res.arrayBuffer())',
+  '} else {',
+  '  const file = resolveSrc(src)',
+  "  if (!existsSync(file)) { console.error('file not found: ' + file); process.exit(2) }",
+  '  buf = readFileSync(file)',
+  '}',
   'const outBuf = await sharp(buf, { limitInputPixels: 100000000 })',
   "  .resize({ width: 2048, height: 2048, fit: 'inside', withoutEnlargement: true })",
   '  .png()',
   '  .toBuffer()',
   "stdout.write(outBuf.toString('base64'))",
-].join('\n') + '\n'
+].join('\n') + '\n' // @eye-script-end REF_TO_PNG_B64_MJS
 
 const OCR_STDIN_PS1 = [
   'param()',
@@ -68,7 +76,10 @@ const OCR_STDIN_PS1 = [
   '  Remove-Item $tmp -Force -ErrorAction SilentlyContinue',
   '  exit 1',
   '}',
-  '$engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()',
+  '[Windows.Globalization.Language,Windows.Foundation,ContentType=WindowsRuntime] > $null',
+  '$engine = $null',
+  'try { $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage([Windows.Globalization.Language]::new("zh-Hans")) } catch { $engine = $null }',
+  'if ($null -eq $engine) { $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages() }',
   'if ($null -eq $engine) {',
   '  $langs = [Windows.Media.Ocr.OcrEngine]::AvailableRecognizerLanguages',
   '  if ($langs.Count -gt 0) { $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage($langs[0]) }',
@@ -85,7 +96,7 @@ const OCR_STDIN_PS1 = [
   '}',
   'foreach ($line in $result.Lines) { Write-Output $line.Text }',
   'Remove-Item $tmp -Force -ErrorAction SilentlyContinue',
-].join('\r\n') + '\r\n'
+].join('\r\n') + '\r\n' // @eye-script-end OCR_STDIN_PS1
 
 // 多图 VLM:argv = [mediaType, configPath, task, ...src]
 const VLM_FILE_MJS = [
@@ -103,25 +114,46 @@ const VLM_FILE_MJS = [
   '  }',
   '  return s',
   '}',
-  'const files = srcs.map(resolveSrc)',
-  'for (const file of files) { if (!existsSync(file)) { console.error("file not found: " + file); process.exit(2) } }',
+  'const toBuf = async (s) => {',
+  "  const isUrl = typeof s === 'string' && /^https?:\\/\\//i.test(s)",
+  '  if (isUrl) {',
+  '    const res = await fetch(s, { signal: AbortSignal.timeout(30000) })',
+  "    if (!res.ok) { throw new Error('download failed: HTTP ' + res.status) }",
+  '    return Buffer.from(await res.arrayBuffer())',
+  '  }',
+  '  const file = resolveSrc(s)',
+  "  if (!existsSync(file)) { throw new Error('file not found: ' + file) }",
+  '  return readFileSync(file)',
+  '}',
+  'const bufs = await Promise.all(srcs.map(toBuf))',
   "const cfg = JSON.parse(readFileSync(configPath, 'utf8'))",
   'const vlm = cfg && cfg.vlm',
   "if (!vlm || !vlm.url || !vlm.model || !vlm.apiKey) { console.error('eye.config.json 缺少 vlm.url / vlm.model / vlm.apiKey'); process.exit(3) }",
   "const mime = /^image\\/(png|jpeg|webp|gif)$/.test(mediaType || '') ? mediaType : 'image/png'",
-  'const userFocus = typeof task === "string" && task.trim() !== "" ? task.trim() : ""',
+  'const userFocus = typeof task === "string" && task.trim() !== "" ? task.trim().slice(0, 800) : ""',
   'const fallbackPrompt = vlm.prompt || "请详细描述这张图片:包括画面内容、图表数据、界面元素、文字等。"',
   'const prompt = userFocus !== "" ? userFocus + "\\n\\n(以上是用户的关注点,请结合它观察图片。)" : fallbackPrompt',
   'const content = [{ type: "text", text: prompt }]',
-  'for (const file of files) { content.push({ type: "image_url", image_url: { url: `data:${mime};base64,${readFileSync(file).toString("base64")}` } }) }',
-  'const res = await fetch(vlm.url, { method: "POST", headers: { "Content-Type": "application/json", "Authorization": "Bearer " + vlm.apiKey }, body: JSON.stringify({ model: vlm.model, messages: [{ role: "user", content }], max_tokens: 1024 }), signal: AbortSignal.timeout(120000) })',
+  'for (const buf of bufs) { content.push({ type: "image_url", image_url: { url: `data:${mime};base64,${buf.toString("base64")}` } }) }',
+  'const fetchVlm = async (retries) => {',
+  '  for (let attempt = 0; ; attempt += 1) {',
+  '    try {',
+  '      const res = await fetch(vlm.url, { method: "POST", headers: { "Content-Type": "application/json", "Authorization": "Bearer " + vlm.apiKey }, body: JSON.stringify({ model: vlm.model, messages: [{ role: "user", content }], max_tokens: 1024 }), signal: AbortSignal.timeout(120000) })',
+  "      if (res.ok || attempt >= retries || (res.status < 500 && res.status !== 429)) return res",
+  '    } catch (err) {',
+  "      if (attempt >= retries) throw err",
+  '    }',
+  "    await new Promise((r) => setTimeout(r, 800 * (attempt + 1)))",
+  '  }',
+  '}',
+  'const res = await fetchVlm(1)',
   'if (!res.ok) { const body = (await res.text()).slice(0, 800); console.error(`VLM HTTP ${res.status}: ${body}`); process.exit(2) }',
   'const json = await res.json()',
   'const c = json && json.choices && json.choices[0] && json.choices[0].message && json.choices[0].message.content',
   'const text = typeof c === "string" ? c : (Array.isArray(c) ? c.filter((p) => p && p.type === "text").map((p) => p.text || "").join("\\n") : "")',
   "if (typeof text !== 'string' || text.trim() === '') { console.error('VLM 响应缺少 choices[0].message.content'); process.exit(2) }",
   'console.log(text)',
-].join('\n') + '\n'
+].join('\n') + '\n' // @eye-script-end VLM_FILE_MJS
 
 // macOS Vision OCR(JXA + ObjC bridge,参考 dsh-vision 的 local-vision.ts):
 // osascript -l JavaScript 执行,argv[0] = 图片绝对路径,stdout = JSON
@@ -170,7 +202,7 @@ const MACOS_VISION_JXA = [
   '    items: items',
   '  });',
   '}',
-].join('\n') + '\n'
+].join('\n') + '\n' // @eye-script-end MACOS_VISION_JXA
 
 module.exports = {
   name: 'dsh-eye-host',
@@ -404,6 +436,20 @@ module.exports = {
       ].filter((line) => line !== '').join('\n')
     }
 
+    // system 可能是字符串或内容块数组,统一转文本(String(array) 会变成 "[object Object]")
+    const systemText = (s) => {
+      if (s === undefined || s === null) return ''
+      if (typeof s === 'string') return s
+      if (Array.isArray(s)) {
+        return s.map((b) => {
+          if (typeof b === 'string') return b
+          if (b && typeof b === 'object' && typeof b.text === 'string') return b.text
+          return ''
+        }).filter((t) => t !== '').join('\n')
+      }
+      return String(s)
+    }
+
     const collectImageRefs = (messages) => {
       const refs = []
       const seen = new Set()
@@ -509,9 +555,8 @@ module.exports = {
           content: withoutImagesWithText(message && message.content, labels, analysis.text),
         }))
         const visionContext = buildVisionContext(analysis.text, task, refs.length)
-        const system = options.system === undefined || String(options.system).trim() === ''
-          ? visionContext
-          : String(options.system) + '\n\n' + visionContext
+        const sys = systemText(options.system)
+        const system = sys.trim() === '' ? visionContext : sys + '\n\n' + visionContext
         yield* llm.stream({ ...options, messages: transformed, system })
       } catch (err) { yield* next() }
     }
@@ -528,12 +573,16 @@ module.exports = {
 
     const see = async (filePath, mode) => {
       const lower = String(filePath).toLowerCase()
-      if (!/\.(png|jpe?g|webp|gif)$/.test(lower)) return { ok: false, text: 'eye: 只支持 png/jpg/jpeg/webp/gif(得到 ' + filePath + ')' }
+      const isUrl = /^https?:\/\//i.test(lower)
+      if (!isUrl && !/\.(png|jpe?g|webp|gif)$/.test(lower)) return { ok: false, text: 'eye: 只支持 png/jpg/jpeg/webp/gif 或 http(s) 图片 URL(得到 ' + filePath + ')' }
       try {
-        const imgTarget = await fs.resolve(filePath, { cwd: root })
-        const imgInfo = await fs.stat(imgTarget)
-        if (!imgInfo) return { ok: false, text: 'eye: 文件不存在: ' + filePath }
-        const imgPath = fs.processPath(imgTarget)
+        let imgPath = filePath
+        if (!isUrl) {
+          const imgTarget = await fs.resolve(filePath, { cwd: root })
+          const imgInfo = await fs.stat(imgTarget)
+          if (!imgInfo) return { ok: false, text: 'eye: 文件不存在: ' + filePath }
+          imgPath = fs.processPath(imgTarget)
+        }
         const { cfg, cfgPath } = await loadConfig()
         const ocrEnabled = cfg.ocr !== false
         const vlmConfigured = !!(cfg.vlm && cfg.vlm.url && cfg.vlm.model && cfg.vlm.apiKey)
@@ -548,7 +597,7 @@ module.exports = {
 
     const tool = {
       name: 'eye_see',
-      description: '读取图片并把内容转成纯文本(OCR + VLM 双路径)供纯文本模型理解:配置 .eye/eye.config.json',
+      description: '读取图片并把内容转成纯文本(OCR + VLM 双路径)供纯文本模型理解:支持本地路径或 http(s) 图片 URL;配置 .eye/eye.config.json',
       parameters: {
         type: 'object',
         properties: {

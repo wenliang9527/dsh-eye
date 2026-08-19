@@ -129,10 +129,11 @@ npx @deepseek-ai/dsh plugin --profile web add github:wenliang9527/dsh-eye
 ```
 
 - 不配 VLM 也能用:OCR 开箱即用
-  - Windows:Win10+ 中文系统一般自带 OCR 语言包
+  - Windows:Win10+ 中文系统一般自带 OCR 语言包(识别优先 zh-Hans)
   - macOS:系统 Vision 框架,零安装
 - 配置后图片识别 = OCR 文字 + VLM 语义描述双路径,艺术字/图表识别更准确
-- `eye_see` 工具:`mode` = `auto`(OCR+VLM)/ `ocr` / `vlm`
+- `eye_see` 工具:`mode` = `auto`(OCR+VLM)/ `ocr` / `vlm`;`file_path` 支持**本地路径或 http(s) 图片 URL**
+- VLM 请求失败自动重试 1 次(5xx/限流/网络抖动);用户关注点超过 800 字符自动截断
 
 > 💡 **智谱 GLM-4V 免费档**:到 [bigmodel.cn](https://bigmodel.cn) 注册,控制台创建 API Key,`glm-4v-flash` 免费调用,零成本获得语义级图片理解。
 

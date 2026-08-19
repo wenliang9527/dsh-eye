@@ -36,6 +36,7 @@
 
 - [ ] 让模型调用 `eye_see`,`file_path` 指向本地图片绝对路径 → 返回 OCR+VLM 文本
 - [ ] `mode=ocr`(仅 OCR)/ `mode=vlm`(仅 VLM)分别验证
+- [ ] `file_path` 传一个 http(s) 图片 URL(如 `https://.../a.png`)→ 能下载并识别(VLM 路径需已配置)
 
 ## 6. 边界与回滚
 
